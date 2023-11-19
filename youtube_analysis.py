@@ -9,17 +9,35 @@ import evadb
 from pytube import YouTube, extract
 from youtube_transcript_api import YouTubeTranscriptApi
 
+from enum import Enum
+
 MAX_CHUNK_SIZE = 1000
 DEFAULT_VIDEO_LINK = "https://www.youtube.com/watch?v=0E_wXecn4DU&pp=ygUKZGFpbHkgZG9zZQ%3D%3D"
 SECOND_DEFAULT_LINK = "https://www.youtube.com/watch?v=42m9WKQ0jC0&pp=ygUKZGFpbHkgZG9zZQ%3D%3D"
 DEFAULT_PROMPT = "Summarize the video"
-
 YT_CONST = "https://www.youtube.com/watch?v="
+SEPARATOR = "===========================================\n"
 
 # file paths
 TRANSCRIPT_PATH = os.path.join("evadb_data", "tmp")
 SUMMARY_PATH = os.path.join("evadb_data", "tmp", "summary.csv")
 TRANSCRIPT_DIR = os.path.join("evadb_data", "transcripts")
+
+
+
+class UserInteraction(Enum):
+    WELCOME = ("\n🔮 Welcome to EvaDB! This app lets you ask questions on any YouTube video.\nYou will only need to "
+               "supply a Youtube URL.\n")
+    ADD_VID = "\nWould you like to add an additional Video? (enter 'yes' if so): "
+    ADD_ANALYSIS = "\nWould you like to analyze another Video? (enter 'yes' if so): "
+    QUESTION_PROMPT = SEPARATOR + "🪄 Ask anything about the video!"
+    GENERATING = SEPARATOR + "⏳ Generating response (may take a while)..."
+    RESPONSE = SEPARATOR + "✅ Answer:"
+    PROGRAM_HALT = SEPARATOR + ""
+
+    def __str__(self):
+        return self.value
+
 
 global video_links
 video_links = {}
@@ -50,13 +68,6 @@ def start():
         cleanup()
     else:  # direction == 0
         recreate_video_links()
-
-
-def add_to_video_links(video_link: str):
-    youtube = YouTube(video_link)
-    youtube_id = youtube.video_id
-    video_title = youtube.title
-    video_links[youtube_id] = video_title
 
 
 def partition_transcript(raw_transcript: str):
@@ -141,6 +152,30 @@ def download_youtube_video_transcript(video_id: str):
     print("✅ Video transcript downloaded successfully.")
     return transcript
 
+
+def parse_video_links():
+    for youtube_id, video_link in video_links.items():
+        # Check if a transcript file already exists
+        if os.path.exists(os.path.join(TRANSCRIPT_DIR, f"{youtube_id}.txt")): continue
+        transcript = download_youtube_video_transcript(youtube_id)
+
+        # Group the list of transcripts into a single raw transcript.
+        if transcript is not None: transcript = group_transcript(transcript)
+        write_transcript_to_file(youtube_id=youtube_id, transcript=transcript)
+
+
+def get_openai_key():
+    # get OpenAI key if needed
+    try:
+        if API_KEY == "":
+            api_key = os.environ["OPENAI_KEY"]
+        else:
+            api_key = API_KEY
+    except KeyError:
+        api_key = str(input("🔑 Enter your OpenAI key: "))
+        os.environ["OPENAI_KEY"] = api_key
+
+
 def cleanup():
     """Removes any temporary file / directory created by EvaDB."""
     if os.path.exists("evadb_data"):
@@ -214,6 +249,7 @@ def generate_summary(cursor: evadb.EvaDBCursor, table_name: str):
 
     Args:
         cursor (EVADBCursor): evadb api cursor.
+        :param table_name: table to query
     """
     transcript_list = cursor.table(table_name).select("text").df()["text"]
     if len(transcript_list) == 1:
@@ -276,10 +312,13 @@ def generate_response(cursor: evadb.EvaDBCursor, question: str, table_name: str)
     Args:
         cursor (EVADBCursor): evadb api cursor.
         question (str): question to ask to llm.
+        table_name (str): table to query from.
 
     Returns
         str: response from llm.
     """
+
+    transcript_list = cursor.query(f"SELECT text FROM {table_name};").df()["text"]
 
     if len(cursor.table(table_name).select("text").df()["text"]) == 1:
         return (
@@ -288,7 +327,7 @@ def generate_response(cursor: evadb.EvaDBCursor, question: str, table_name: str)
             .df()["chatgpt.response"][0]
         )
     else:
-        # generate summary of the video if its too long
+        # generate summary of the video if it's too long
         if not os.path.exists(SUMMARY_PATH):
             generate_summary(cursor, table_name)
 
@@ -297,6 +336,13 @@ def generate_response(cursor: evadb.EvaDBCursor, question: str, table_name: str)
             .select(f"ChatGPT('{question}', summary)")
             .df()["chatgpt.response"][0]
         )
+
+
+def add_to_video_links(video_link: str):
+    youtube = YouTube(video_link)
+    youtube_id = youtube.video_id
+    video_title = youtube.title
+    video_links[youtube_id] = video_title
 
 
 def receive_user_input():
@@ -320,61 +366,65 @@ def receive_user_input():
             print("⚠️ Please enter a valid YouTube URL.\n")
 
 
-def query_video(youtube_id: str):
-    transcript = read_transcript(youtube_id)
+def video_title_to_table_name(youtube_id: str):
+    """
+    Convert youtube video title to acceptable table names
+    :param youtube_id: youtube video id
+    :return: table_name
+    """
+    # Replace spaces with underscores
+    video_title = video_links.get(youtube_id).replace(' ', '_')
+    # Remove special characters
+    video_title = ''.join(ch for ch in video_title if ch.isalnum() or ch == '_')
+    # Use the sanitized video title as the table name
+    table_name = f"{video_title}_Transcript"
+    return table_name
 
+
+def partition_transcript_logic(transcript: str, youtube_id: str):
     # Partition the transcripts if they are too big to circumvent LLM token restrictions.
+    path = ""
     if transcript is not None:
         partitioned_transcript = partition_transcript(transcript)
         df = pd.DataFrame(partitioned_transcript)
         # Name the CSV file based on the youtube_id and save it in the directory specified by TRANSCRIPT_PATH
         path = os.path.join(TRANSCRIPT_PATH, f"{youtube_id}.csv")
         df.to_csv(path)
-
-    # load chunked transcript into table
-
-    # Replace spaces with underscores
-    video_title = video_links.get(youtube_id).replace(' ', '_')
-    # Remove special characters
-    video_title = ''.join(e for e in video_title if e.isalnum() or e == '_')
-    # Use the sanitized video title as the table name
-    table_name = f"{video_title}_Transcript"
+    return path
 
 
+def create_and_load_table(table_name: str, path: str):
     # Create a new table named based on the youtube_id
     cursor.drop_table(table_name=table_name, if_exists=True).execute()
     cursor.query(f"""CREATE TABLE IF NOT EXISTS {table_name} (text TEXT(50));""").execute()
     # Load the CSV file into the table
     cursor.load(path, table_name, "csv").execute()
 
-    separator = "===========================================\n"
-    print(separator)
-    print("🪄 Ask anything about the video!")
+
+def query_video(youtube_id: str):
+    transcript = read_transcript(youtube_id)
+    table_name = video_title_to_table_name(youtube_id)
+    path = partition_transcript_logic(transcript)
+    create_and_load_table(table_name, path)
+
+    print(UserInteraction.QUESTION_PROMPT)
     while True:
         question = str(input("Question (enter 'exit' to exit): "))
 
-        if question == "":
-            question = DEFAULT_PROMPT
-        elif question.lower() == "exit":
-            break
+        if question == "": question = DEFAULT_PROMPT
+        elif question.lower() == "exit": break
 
         # Generate response with chatgpt udf
-        print("⏳ Generating response (may take a while)...")
+        print(UserInteraction.GENERATING)
         response = generate_response(cursor, question, table_name)
-        print(separator)
-        print("✅ Answer:")
+        print(UserInteraction.RESPONSE)
         print(response)
-        print(separator)
-
-    print("✅ Session ended.")
-    print(separator)
+        print(SEPARATOR)
 
 
 if __name__ == "__main__":
 
-    print(
-        "🔮 Welcome to EvaDB! This app lets you ask questions on any YouTube video.\nYou will only need to supply a "
-        "Youtube URL.\n")
+    print(UserInteraction.WELCOME)
 
     try:
         start()
@@ -384,31 +434,18 @@ if __name__ == "__main__":
 
         while True:
             receive_user_input()
-            if str(input("\nWould you like to add an additional Video? (enter 'yes' if so): ")).lower() not in [
-                "y", "yes"]: break
+            if str(input(UserInteraction.ADD_VID)).lower() not in ["y", "yes"]: break
 
-        for youtube_id, video_link in video_links.items():
-            # Check if a transcript file already exists
-            if os.path.exists(os.path.join(TRANSCRIPT_DIR, f"{youtube_id}.txt")): continue
-            transcript = download_youtube_video_transcript(youtube_id)
-
-            # Group the list of transcripts into a single raw transcript.
-            if transcript is not None: transcript = group_transcript(transcript)
-            write_transcript_to_file(youtube_id=youtube_id, transcript=transcript)
-
-        # get OpenAI key if needed
-        try:
-            api_key = os.environ["OPENAI_KEY"]
-        except KeyError:
-            api_key = str(input("🔑 Enter your OpenAI key: "))
-            os.environ["OPENAI_KEY"] = api_key
+        parse_video_links()
+        get_openai_key()
 
         while True:
             choice = list_videos()
             query_video(choice)
-            if str(input("\nWould you like to analyze another Video? (enter 'yes' if so): ")).lower() not in [
-                "y", "yes"]: break
+            if str(input(UserInteraction.ADD_ANALYSIS)).lower() not in ["y", "yes"]: break
 
+        print("✅ Session ended.")
+        print(SEPARATOR)
     except Exception as e:
         print("❗️ Session ended with an error.")
         print(e)
