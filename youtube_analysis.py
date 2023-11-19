@@ -10,11 +10,14 @@ from pytube import YouTube, extract
 from youtube_transcript_api import YouTubeTranscriptApi
 
 from enum import Enum
+import math
 
 MAX_CHUNK_SIZE = 1000
 DEFAULT_VIDEO_LINK = "https://www.youtube.com/watch?v=0E_wXecn4DU&pp=ygUKZGFpbHkgZG9zZQ%3D%3D"
 SECOND_DEFAULT_LINK = "https://www.youtube.com/watch?v=42m9WKQ0jC0&pp=ygUKZGFpbHkgZG9zZQ%3D%3D"
 DEFAULT_PROMPT = "Summarize the video"
+SENTIMENT_ANALYSIS = ("Classify the text as positive or negative. Think step-by-step, and provide reasoning why "
+                      "the text is identified as positive or negative.")
 YT_CONST = "https://www.youtube.com/watch?v="
 SEPARATOR = "===========================================\n"
 
@@ -58,11 +61,14 @@ def recreate_video_links():
 
 def start():
     while True:
-        direction = int(input("Enter 0 to use former data, Enter 1 to start anew: "))
-        if direction not in [0, 1]:
-            print("Invalid input. Please enter either 0 or 1.")
-        else:
-            break
+        try:
+            direction = int(input("Enter 0 to use former data, Enter 1 to start anew: "))
+            if direction not in [0, 1]:
+                print("Invalid input. Please enter either 0 or 1.")
+            else:
+                break
+        except ValueError:
+            print("Invalid input. Please enter a valid integer.\n")
 
     if direction == 1:
         cleanup()
@@ -170,7 +176,7 @@ def get_openai_key():
         if API_KEY == "":
             api_key = os.environ["OPENAI_KEY"]
         else:
-            api_key = API_KEY
+            os.environ["OPENAI_KEY"] = API_KEY
     except KeyError:
         api_key = str(input("🔑 Enter your OpenAI key: "))
         os.environ["OPENAI_KEY"] = api_key
@@ -317,15 +323,13 @@ def generate_response(cursor: evadb.EvaDBCursor, question: str, table_name: str)
     Returns
         str: response from llm.
     """
-
-    transcript_list = cursor.query(f"SELECT text FROM {table_name};").df()["text"]
-
-    if len(cursor.table(table_name).select("text").df()["text"]) == 1:
-        return (
-            cursor.table(table_name)
-            .select(f"ChatGPT('{question}', text)")
-            .df()["chatgpt.response"][0]
-        )
+    if cursor.query(f"SELECT text FROM {table_name};").df().size == 1:
+        response_df = cursor.query(f"SELECT ChatGPT('{question}', text) FROM {table_name};").df()
+        if not response_df.empty:
+            return response_df["chatgpt.response"][0]
+        else:
+            # Handle the case where the DataFrame is empty
+            return "No response available"  # Or any other appropriate message
     else:
         # generate summary of the video if it's too long
         if not os.path.exists(SUMMARY_PATH):
@@ -336,6 +340,14 @@ def generate_response(cursor: evadb.EvaDBCursor, question: str, table_name: str)
             .select(f"ChatGPT('{question}', summary)")
             .df()["chatgpt.response"][0]
         )
+
+
+def initial_response(cursor: evadb.EvaDBCursor, table_name: str) -> str:
+
+    summary = generate_response(cursor, DEFAULT_PROMPT, table_name)
+    sentiment = generate_response(cursor, SENTIMENT_ANALYSIS, table_name)
+
+    return summary , sentiment
 
 
 def add_to_video_links(video_link: str):
@@ -404,15 +416,25 @@ def create_and_load_table(table_name: str, path: str):
 def query_video(youtube_id: str):
     transcript = read_transcript(youtube_id)
     table_name = video_title_to_table_name(youtube_id)
-    path = partition_transcript_logic(transcript)
+    path = partition_transcript_logic(transcript, youtube_id)
     create_and_load_table(table_name, path)
 
     print(UserInteraction.QUESTION_PROMPT)
     while True:
         question = str(input("Question (enter 'exit' to exit): "))
 
-        if question == "": question = DEFAULT_PROMPT
-        elif question.lower() == "exit": break
+        if question.lower() == "exit":
+            break
+
+        if question == "":
+            print(UserInteraction.GENERATING)
+            summary, sentiment = initial_response(cursor, table_name)
+            print(UserInteraction.RESPONSE)
+            print(summary)
+            print()
+            print(sentiment)
+            print(SEPARATOR)
+            continue
 
         # Generate response with chatgpt udf
         print(UserInteraction.GENERATING)
