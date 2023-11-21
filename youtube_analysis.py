@@ -3,7 +3,6 @@ import shutil
 from typing import Dict, List
 
 import pandas as pd
-
 import evadb
 
 from pytube import YouTube, extract
@@ -13,6 +12,7 @@ from enum import Enum
 
 from googleapiclient.discovery import build
 import csv
+
 
 MAX_CHUNK_SIZE = 1000
 DEFAULT_VIDEO_LINK = "https://www.youtube.com/watch?v=0E_wXecn4DU&pp=ygUKZGFpbHkgZG9zZQ%3D%3D"
@@ -182,10 +182,10 @@ def parse_video_links():
 def get_openai_key():
     # get OpenAI key if needed
     try:
-        if API_KEY == "":
+        if OPENAI_API_KEY == "":
             api_key = os.environ["OPENAI_API_KEY"]
         else:
-            os.environ["OPENAI_API_KEY"] = API_KEY
+            os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
     except KeyError:
         api_key = str(input("🔑 Enter your OpenAI key: "))
         os.environ["OPENAI_API_KEY"] = api_key
