@@ -10,22 +10,28 @@ from pytube import YouTube, extract
 from youtube_transcript_api import YouTubeTranscriptApi
 
 from enum import Enum
-import math
+
+from googleapiclient.discovery import build
+import csv
 
 MAX_CHUNK_SIZE = 1000
 DEFAULT_VIDEO_LINK = "https://www.youtube.com/watch?v=0E_wXecn4DU&pp=ygUKZGFpbHkgZG9zZQ%3D%3D"
 SECOND_DEFAULT_LINK = "https://www.youtube.com/watch?v=42m9WKQ0jC0&pp=ygUKZGFpbHkgZG9zZQ%3D%3D"
 DEFAULT_PROMPT = "Summarize the video"
-SENTIMENT_ANALYSIS = ("Classify the text as positive or negative. Think step-by-step, and provide reasoning why "
-                      "the text is identified as positive or negative.")
+VIDEO_SENTIMENT_ANALYSIS = ("Classify the text as positive or negative. Think step-by-step, and provide reasoning why "
+                            "the text is identified as positive or negative.")
+COMMENT_SENTIMENT_QUESTION = "Is this comment positive or negative? Answer only with the word <Positive> or <Negative>"
 YT_CONST = "https://www.youtube.com/watch?v="
-SEPARATOR = "===========================================\n"
+SEPARATOR = "\n===========================================\n"
+NUM_COMMENTS = 10
+
+os.environ["YOUTUBE_API_KEY"] = "AIzaSyDtZjRWBX4OYcVUzQ6WmjYBeCtt_GGM3Gk"
 
 # file paths
 TRANSCRIPT_PATH = os.path.join("evadb_data", "tmp")
 SUMMARY_PATH = os.path.join("evadb_data", "tmp", "summary.csv")
 TRANSCRIPT_DIR = os.path.join("evadb_data", "transcripts")
-
+COMMENT_PATH = os.path.join("evadb_data", "comments")
 
 
 class UserInteraction(Enum):
@@ -33,13 +39,16 @@ class UserInteraction(Enum):
                "supply a Youtube URL.\n")
     ADD_VID = "\nWould you like to add an additional Video? (enter 'yes' if so): "
     ADD_ANALYSIS = "\nWould you like to analyze another Video? (enter 'yes' if so): "
-    QUESTION_PROMPT = SEPARATOR + "🪄 Ask anything about the video!"
+    QUESTION_PROMPT = (f"{SEPARATOR}🪄 Ask anything about the video!\nQuestion (enter 'exit' to exit) (Press enter "
+                       f"for default response):")
     GENERATING = SEPARATOR + "⏳ Generating response (may take a while)..."
-    RESPONSE = SEPARATOR + "✅ Answer:"
-    PROGRAM_HALT = SEPARATOR + ""
+    ANSWER = SEPARATOR + "✅ Answer:"
+    VIDEO_SENTIMENT = f"{SEPARATOR}Video Sentiment Analysis: \n"
+    COMMENT_SENTIMENT = f"{SEPARATOR}Comment Sentiment Analysis: \n"
+    PROGRAM_HALT = SEPARATOR
 
     def __str__(self):
-        return self.value
+        return str(self.value)
 
 
 global video_links
@@ -174,12 +183,12 @@ def get_openai_key():
     # get OpenAI key if needed
     try:
         if API_KEY == "":
-            api_key = os.environ["OPENAI_KEY"]
+            api_key = os.environ["OPENAI_API_KEY"]
         else:
-            os.environ["OPENAI_KEY"] = API_KEY
+            os.environ["OPENAI_API_KEY"] = API_KEY
     except KeyError:
         api_key = str(input("🔑 Enter your OpenAI key: "))
-        os.environ["OPENAI_KEY"] = api_key
+        os.environ["OPENAI_API_KEY"] = api_key
 
 
 def cleanup():
@@ -248,6 +257,38 @@ def read_transcript(youtube_id):
     """
     with open(os.path.join(TRANSCRIPT_DIR, f"{youtube_id}.txt"), "r") as file:
         return file.read()
+
+
+def get_top_comments(video_id, max_results=NUM_COMMENTS):
+    youtube = build('youtube', 'v3', developerKey=os.environ["YOUTUBE_API_KEY"])
+
+    # Retrieve comments for the video
+    comments = youtube.commentThreads().list(
+        part='snippet',
+        videoId=video_id,
+        order='relevance',
+        textFormat='plainText',
+        maxResults=max_results
+    ).execute()
+    # Extract top comments
+    top_comments = [comment['snippet']['topLevelComment']['snippet']['textDisplay'] for comment in comments['items']]
+
+    return top_comments
+
+
+def store_comments_as_csv(video_id, top_comments):
+    # Ensure the comments directory exists
+    os.makedirs(COMMENT_PATH, exist_ok=True)
+
+    file_name = os.path.join(COMMENT_PATH, f"{video_id}.csv")
+
+    with open(file_name, 'w', newline='', encoding='utf-8') as file:
+        writer = csv.writer(file)
+        writer.writerow(['comment'])  # Header
+        for comment in top_comments:
+            writer.writerow([comment])
+
+    return file_name
 
 
 def generate_summary(cursor: evadb.EvaDBCursor, table_name: str):
@@ -326,7 +367,7 @@ def generate_response(cursor: evadb.EvaDBCursor, question: str, table_name: str)
     if cursor.query(f"SELECT text FROM {table_name};").df().size == 1:
         response_df = cursor.query(f"SELECT ChatGPT('{question}', text) FROM {table_name};").df()
         if not response_df.empty:
-            return response_df["chatgpt.response"][0]
+            return response_df.iloc[0, 0]
         else:
             # Handle the case where the DataFrame is empty
             return "No response available"  # Or any other appropriate message
@@ -342,12 +383,32 @@ def generate_response(cursor: evadb.EvaDBCursor, question: str, table_name: str)
         )
 
 
-def initial_response(cursor: evadb.EvaDBCursor, table_name: str) -> str:
+def initial_response(cursor: evadb.EvaDBCursor, table_name: str, comment_table_name: str):
+    print(UserInteraction.GENERATING)
 
     summary = generate_response(cursor, DEFAULT_PROMPT, table_name)
-    sentiment = generate_response(cursor, SENTIMENT_ANALYSIS, table_name)
+    sentiment = generate_response(cursor, VIDEO_SENTIMENT_ANALYSIS, table_name)
+    comments_df = cursor.table(comment_table_name).select(f"ChatGPT('{COMMENT_SENTIMENT_QUESTION}', comment)").df()
 
-    return summary , sentiment
+    # Count sentiment occurrences
+    counter = [0, 0, 0]
+    for index, row in comments_df.iterrows():
+        response = row.iloc[0]
+        if 'positive' in response.lower():
+            counter[0] += 1
+        elif 'negative' in response.lower():
+            counter[1] += 1
+        else:
+            counter[2] += 1
+
+    print(UserInteraction.ANSWER)
+    print(summary)
+    print(UserInteraction.VIDEO_SENTIMENT)
+    print(sentiment)
+    print(UserInteraction.COMMENT_SENTIMENT)
+    # Print sentiment counts
+    print(f"{counter[0]} positive, {counter[1]} negative, {counter[2]} neutral/unsure")
+    print(SEPARATOR)
 
 
 def add_to_video_links(video_link: str):
@@ -413,33 +474,42 @@ def create_and_load_table(table_name: str, path: str):
     cursor.load(path, table_name, "csv").execute()
 
 
+def create_and_load_comment_table(table_name, path):
+    # Drop the table if it already exists
+    cursor.drop_table(table_name=table_name, if_exists=True).execute()
+    # Create the table with the expected columns
+    cursor.query(f"CREATE TABLE IF NOT EXISTS {table_name} (comment TEXT(100));").execute()
+    # Load the CSV file into the table, skipping the header row
+    cursor.load(path, table_name, "csv", skiprows=1).execute()
+
+
 def query_video(youtube_id: str):
     transcript = read_transcript(youtube_id)
     table_name = video_title_to_table_name(youtube_id)
     path = partition_transcript_logic(transcript, youtube_id)
     create_and_load_table(table_name, path)
 
-    print(UserInteraction.QUESTION_PROMPT)
-    while True:
-        question = str(input("Question (enter 'exit' to exit): "))
+    # Retrieve top comments
+    top_comments = get_top_comments(youtube_id)
+    # Store comments as CSV
+    comment_path = store_comments_as_csv(youtube_id, top_comments)
+    comment_table_name = table_name[:-len('Transcript')].rstrip('_') + "_Comments"
+    # Create and load the table with comments
+    create_and_load_comment_table(comment_table_name, comment_path)
 
+    while True:
+        question = str(input(UserInteraction.QUESTION_PROMPT))
         if question.lower() == "exit":
             break
 
         if question == "":
-            print(UserInteraction.GENERATING)
-            summary, sentiment = initial_response(cursor, table_name)
-            print(UserInteraction.RESPONSE)
-            print(summary)
-            print()
-            print(sentiment)
-            print(SEPARATOR)
+            initial_response(cursor, table_name, comment_table_name)
             continue
 
         # Generate response with chatgpt udf
         print(UserInteraction.GENERATING)
         response = generate_response(cursor, question, table_name)
-        print(UserInteraction.RESPONSE)
+        print(UserInteraction.ANSWER)
         print(response)
         print(SEPARATOR)
 
