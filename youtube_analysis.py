@@ -5,7 +5,7 @@ from typing import Dict, List
 import pandas as pd
 import evadb
 
-from pytube import YouTube, extract
+from pytube import YouTube
 from youtube_transcript_api import YouTubeTranscriptApi
 
 from enum import Enum
@@ -25,6 +25,7 @@ YT_CONST = "https://www.youtube.com/watch?v="
 SEPARATOR = "\n===========================================\n"
 NUM_COMMENTS = 10
 
+OPENAI_API_KEY = ""
 os.environ["YOUTUBE_API_KEY"] = "AIzaSyDtZjRWBX4OYcVUzQ6WmjYBeCtt_GGM3Gk"
 
 # file paths
