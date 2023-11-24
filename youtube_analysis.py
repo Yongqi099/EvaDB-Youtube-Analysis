@@ -1,6 +1,6 @@
 import os
 import shutil
-from typing import Dict, List
+from typing import List
 
 import pandas as pd
 import evadb
@@ -13,13 +13,13 @@ from enum import Enum
 from googleapiclient.discovery import build
 import csv
 
-
-MAX_CHUNK_SIZE = 1000
+MAX_CHUNK_SIZE = 10000
 DEFAULT_VIDEO_LINK = "https://www.youtube.com/watch?v=0E_wXecn4DU&pp=ygUKZGFpbHkgZG9zZQ%3D%3D"
 SECOND_DEFAULT_LINK = "https://www.youtube.com/watch?v=42m9WKQ0jC0&pp=ygUKZGFpbHkgZG9zZQ%3D%3D"
 DEFAULT_PROMPT = "Summarize the video"
 VIDEO_SENTIMENT_ANALYSIS = ("Classify the text as positive or negative. Think step-by-step, and provide reasoning why "
-                            "the text is identified as positive or negative.")
+                            "the text is identified as positive or negative. For each step keep your answer at most "
+                            "200 chararacters")
 COMMENT_SENTIMENT_QUESTION = "Is this comment positive or negative? Answer only with the word <Positive> or <Negative>"
 YT_CONST = "https://www.youtube.com/watch?v="
 SEPARATOR = "\n===========================================\n"
@@ -36,6 +36,9 @@ COMMENT_PATH = os.path.join("evadb_data", "comments")
 
 
 class UserInteraction(Enum):
+    """
+    Class of CONST that deals with user prompts
+    """
     WELCOME = ("\n🔮 Welcome to EvaDB! This app lets you ask questions on any YouTube video.\nYou will only need to "
                "supply a Youtube URL.\n")
     ADD_VID = "\nWould you like to add an additional Video? (enter 'yes' if so): "
@@ -57,6 +60,10 @@ video_links = {}
 
 
 def recreate_video_links():
+    """
+    Takes the existing transcripts and recreate the video_links list from it
+    :return:
+    """
     # Iterate over all files in the transcript_dir directory
     for filename in os.listdir(TRANSCRIPT_DIR):
         # Get the file name without the extension
@@ -70,6 +77,10 @@ def recreate_video_links():
 
 
 def start():
+    """
+    Starting logic for app
+    :return:
+    """
     while True:
         try:
             direction = int(input("Enter 0 to use former data, Enter 1 to start anew: "))
@@ -170,6 +181,10 @@ def download_youtube_video_transcript(video_id: str):
 
 
 def parse_video_links():
+    """
+    Gets the transcripts for all videos if required
+    :return:
+    """
     for youtube_id, video_link in video_links.items():
         # Check if a transcript file already exists
         if os.path.exists(os.path.join(TRANSCRIPT_DIR, f"{youtube_id}.txt")): continue
@@ -181,7 +196,10 @@ def parse_video_links():
 
 
 def get_openai_key():
-    # get OpenAI key if needed
+    """
+    get OpenAI key if needed
+    :return:
+    """
     try:
         if OPENAI_API_KEY == "":
             api_key = os.environ["OPENAI_API_KEY"]
@@ -202,7 +220,6 @@ def cleanup():
 
 def write_transcript_to_file(youtube_id, transcript):
     """Writes a transcript to a text file.
-
     Args:
         youtube_id (str): The YouTube video ID.
         transcript (str): The transcript to write.
@@ -218,7 +235,7 @@ def write_transcript_to_file(youtube_id, transcript):
 
 
 def list_videos():
-    """Lists all available transcripts.
+    """Lists all available videos to be queried and prompt user to select a video to query
 
     Returns:
         transcripts (list): A list of available transcripts.
@@ -261,6 +278,12 @@ def read_transcript(youtube_id):
 
 
 def get_top_comments(video_id, max_results=NUM_COMMENTS):
+    """
+    Retrieves the top comments for a YouTube video
+    :param video_id:
+    :param max_results:
+    :return:
+    """
     youtube = build('youtube', 'v3', developerKey=os.environ["YOUTUBE_API_KEY"])
 
     # Retrieve comments for the video
@@ -278,6 +301,12 @@ def get_top_comments(video_id, max_results=NUM_COMMENTS):
 
 
 def store_comments_as_csv(video_id, top_comments):
+    """
+    Stores the fetched YouTube comments as a csv
+    :param video_id:
+    :param top_comments:
+    :return:
+    """
     # Ensure the comments directory exists
     os.makedirs(COMMENT_PATH, exist_ok=True)
 
@@ -385,13 +414,19 @@ def generate_response(cursor: evadb.EvaDBCursor, question: str, table_name: str)
 
 
 def initial_response(cursor: evadb.EvaDBCursor, table_name: str, comment_table_name: str):
-    print(UserInteraction.GENERATING)
-
+    """
+    Default analysis on a video if no prompt is provided
+    Summarize the video, perform sentiment analysis on the video and on the top NUM_COMMENTS comments
+    :param cursor:
+    :param table_name:
+    :param comment_table_name:
+    :return:
+    """
     summary = generate_response(cursor, DEFAULT_PROMPT, table_name)
     sentiment = generate_response(cursor, VIDEO_SENTIMENT_ANALYSIS, table_name)
     comments_df = cursor.table(comment_table_name).select(f"ChatGPT('{COMMENT_SENTIMENT_QUESTION}', comment)").df()
 
-    # Count sentiment occurrences
+    # Count sentiment occurrences: positives, negative, neutral/unsure
     counter = [0, 0, 0]
     for index, row in comments_df.iterrows():
         response = row.iloc[0]
@@ -413,6 +448,11 @@ def initial_response(cursor: evadb.EvaDBCursor, table_name: str, comment_table_n
 
 
 def add_to_video_links(video_link: str):
+    """
+    Add a video to the list of videos
+    :param video_link:
+    :return:
+    """
     youtube = YouTube(video_link)
     youtube_id = youtube.video_id
     video_title = youtube.title
@@ -430,9 +470,8 @@ def receive_user_input():
         ))
 
         if video_link == "": video_link = DEFAULT_VIDEO_LINK
-
         # Check if the URL is a valid YouTube URL
-        if video_link.startswith(YT_CONST):
+        elif video_link.startswith(YT_CONST):
             add_to_video_links(video_link)
             break
 
@@ -456,7 +495,13 @@ def video_title_to_table_name(youtube_id: str):
 
 
 def partition_transcript_logic(transcript: str, youtube_id: str):
-    # Partition the transcripts if they are too big to circumvent LLM token restrictions.
+    """
+    Partition the transcripts if they are too big to circumvent LLM token restrictions and name the CSV file based on
+    the youtube_id and save it in the directory specified by TRANSCRIPT_PATH
+    :param transcript:
+    :param youtube_id:
+    :return:
+    """
     path = ""
     if transcript is not None:
         partitioned_transcript = partition_transcript(transcript)
@@ -468,7 +513,12 @@ def partition_transcript_logic(transcript: str, youtube_id: str):
 
 
 def create_and_load_table(table_name: str, path: str):
-    # Create a new table named based on the youtube_id
+    """
+    Create a new table named based on the youtube_id
+    :param table_name:
+    :param path:
+    :return:
+    """
     cursor.drop_table(table_name=table_name, if_exists=True).execute()
     cursor.query(f"""CREATE TABLE IF NOT EXISTS {table_name} (text TEXT(50));""").execute()
     # Load the CSV file into the table
@@ -476,15 +526,25 @@ def create_and_load_table(table_name: str, path: str):
 
 
 def create_and_load_comment_table(table_name, path):
-    # Drop the table if it already exists
+    """
+    Drop the table if it already exists
+    Create the table with the expected columns
+    Load the CSV file into the table, skipping the header row
+    :param table_name:
+    :param path:
+    :return:
+    """
     cursor.drop_table(table_name=table_name, if_exists=True).execute()
-    # Create the table with the expected columns
     cursor.query(f"CREATE TABLE IF NOT EXISTS {table_name} (comment TEXT(100));").execute()
-    # Load the CSV file into the table, skipping the header row
     cursor.load(path, table_name, "csv", skiprows=1).execute()
 
 
 def query_video(youtube_id: str):
+    """
+    Contains the logic and Executes all the functions needed to query an analysis on a individual video
+    :param youtube_id:
+    :return:
+    """
     transcript = read_transcript(youtube_id)
     table_name = video_title_to_table_name(youtube_id)
     path = partition_transcript_logic(transcript, youtube_id)
@@ -503,6 +563,7 @@ def query_video(youtube_id: str):
         if question.lower() == "exit":
             break
 
+        print(UserInteraction.GENERATING)
         if question == "":
             initial_response(cursor, table_name, comment_table_name)
             continue
